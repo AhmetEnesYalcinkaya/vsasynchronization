@@ -7,6 +7,9 @@ import time
 import psutil
 import pyautogui
 import vlc
+import win32gui
+import win32com.client
+
 
 def create_image_button(root, image_path, size=(80, 80), command=None):
     img = Image.open(image_path)
@@ -138,7 +141,23 @@ def run_vsa(vsa_path):
 
 def open_project(file_path):
     time.sleep(3)
-    
+    # VSA penceresini bul ve odaklan
+    for window in pyautogui.getAllWindows():
+        print(f"Window found: {window.title}")
+    vsa_window = None
+    for window in pyautogui.getAllWindows():
+        if window.title.startswith("VSA"):
+            vsa_window = window
+            break
+
+    if vsa_window:
+        # VSA penceresini aktif hale getir
+        vsa_window.activate()
+        time.sleep(1)  # Pencerenin aktif olması için kısa bir bekleme
+    else:
+        print("VSA penceresi bulunamadı.")
+        return
+
     print("Sending Ctrl + O to open a new project...")
     pyautogui.hotkey('ctrl', 'o')
     
@@ -153,7 +172,7 @@ def open_project(file_path):
     pyautogui.press('enter')
     
     time.sleep(1)
-    #pyautogui.press('enter')
+    pyautogui.press('enter')  # Projeyi başlatmak için ikinci bir Enter
     print("Project opened and started in VSA.")
 
 def play_video_in_vlc(video_path):
@@ -205,7 +224,7 @@ def on_play_button(tree, canvas, controls, vlc_instance):
 
 def create_gui():
     root = tk.Tk()
-    root.title("VSA Player")
+    root.title("Video Player")
 
     controls = {"cap": None, "playing": False, "paused": False}
 
