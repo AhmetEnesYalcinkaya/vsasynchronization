@@ -7,9 +7,7 @@ import time
 import psutil
 import pyautogui
 import vlc
-import win32gui
-import win32com.client
-
+import threading
 
 def create_image_button(root, image_path, size=(80, 80), command=None):
     img = Image.open(image_path)
@@ -25,7 +23,7 @@ def create_popup_menu(event, tree, checkboxes, table_frame):
     popup_menu.add_command(label="Aşağı Taşı", command=lambda: move_down(tree, checkboxes, table_frame))
     popup_menu.add_command(label="Ekle", command=lambda: add_file_to_table(tree, checkboxes, table_frame))
     popup_menu.add_command(label="Kaldır", command=lambda: remove_item(tree, checkboxes))
-    popup_menu.tk_popup(event.x_root, event.y_root)
+    popup_menu.post(event.x_root, event.y_root)
 
 def add_file_to_table(tree, checkboxes, table_frame):
     file_path = filedialog.askopenfilename(filetypes=[("VSA files", "*.vsa")])
@@ -115,7 +113,7 @@ def create_menu(root, tree, checkboxes, table_frame):
     menubar.add_cascade(label="Help", menu=help_menu)
     help_menu.add_command(label="User Guide", command=lambda: messagebox.showinfo("Help", "User Guide Not Available"))
 
-def create_video_area(main_frame):
+def create_video_area(main_frame, vlc_instance):
     video_frame = tk.Frame(main_frame)
     video_frame.pack(side=tk.RIGHT, padx=10, pady=10, expand=True)
 
@@ -124,7 +122,11 @@ def create_video_area(main_frame):
 
     canvas = tk.Canvas(video_frame, width=400, height=300, bg="black")
     canvas.pack()
-    return canvas, video_frame
+
+    # VLC Media Player embedded in canvas
+    player = vlc_instance.media_player_new()
+    player.set_hwnd(canvas.winfo_id())
+    return canvas, video_frame, player
 
 def run_vsa(vsa_path):
     command = [vsa_path]
@@ -132,7 +134,7 @@ def run_vsa(vsa_path):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     while True:
-        if "VSA.exe" in (p.name() for p in psutil.process_iter()):
+        if "VSA.exe" in (p.name() for p in psutil.process_iter(attrs=['name'])):
             print("VSA started.")
             break
         time.sleep(0.1)
@@ -175,52 +177,196 @@ def open_project(file_path):
     pyautogui.press('enter')  # Projeyi başlatmak için ikinci bir Enter
     print("Project opened and started in VSA.")
 
-def play_video_in_vlc(video_path):
+def wait_for_video_to_finish(player, run_time_entry, controls):
+    print("Waiting for video to finish...")
+    while True:
+        # Update runtime in GUI
+        current_time = player.get_time() // 1000
+        run_time_entry.delete(0, tk.END)
+        run_time_entry.insert(0, f"{current_time} sec")
+        if player.get_state() == vlc.State.Ended:
+            print("Video finished.")
+            controls['playing'] = False
+            break
+        time.sleep(1)
+
+def play_video_in_vlc(player, video_path, now_playing_entry, run_time_entry):
+    time.sleep(1)
+    media = player.get_instance().media_new(video_path)
+    player.set_media(media)
+    player.play()
+    # Update Now Playing entry
+    now_playing_entry.delete(0, tk.END)
+    now_playing_entry.insert(0, os.path.basename(video_path))
+    # Start thread to update runtime
+    threading.Thread(target=wait_for_video_to_finish, args=(player, run_time_entry)).start()
+
+def play_video_with_vlc_exe(video_path):
     vlc_path = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
     video_path = os.path.normpath(video_path)
     print(f"Playing video in VLC: {video_path}")
     vlc_command = [vlc_path, video_path, "--play-and-exit"]
     subprocess.Popen(vlc_command)
 
-def wait_for_video_to_finish():
-    print("Waiting for video to finish...")
-    while True:
-        if not any("vlc.exe" in p.name() for p in psutil.process_iter()):
-            print("Video finished.")
-            break
-        time.sleep(1)
-
-# VLC Player for GUI embedding
-def play_vlc_in_canvas(vlc_instance, video_path, canvas):
-    media = vlc_instance.media_new(video_path)
-    media_player = vlc_instance.media_player_new()
-    media_player.set_media(media)
-    canvas_id = canvas.winfo_id()
-    media_player.set_xwindow(canvas_id)
-    media_player.play()
-    return media_player
-
-# Bu fonksiyon, VSA projeleri ve videoları sırayla işler. Her video bittikten sonra sıradaki projeye geçer.
-def cycle_projects_and_videos(tree, canvas, controls, vlc_instance):
-    for item in tree.get_children():
+def cycle_projects_and_videos(tree, canvas, controls, player, now_playing_entry, run_time_entry):
+    # Get all items in the treeview in the order they are listed
+    items = tree.get_children()
+    for item in items:
         vsa_file = tree.item(item)['values'][2]
         video_file = vsa_file.replace('.vsa', '.mp4')
         
         # VSA projesini aç ve çalıştır
         open_project(vsa_file)
         
-        # Videoyu VLC ile oynat
-        play_video_in_vlc(video_file)
+        # Videoyu hem VLC player ile canvas üzerinde hem de VLC exe ile ayrı oynat
+        play_video_with_vlc_exe(video_file)
+        play_video_in_vlc(player, video_file, now_playing_entry, run_time_entry)
+        
         pyautogui.press('enter')
         # Video bitene kadar bekle
-        wait_for_video_to_finish()
-        
+        wait_for_video_to_finish(player, run_time_entry, controls)
+
         # Sonraki projeye geç
         print(f"Completed playing {vsa_file} and {video_file}.")
 
-# Play butonuna basıldığında VSA projeleri ve videoları işleyen fonksiyon
-def on_play_button(tree, canvas, controls, vlc_instance):
-    cycle_projects_and_videos(tree, canvas, controls, vlc_instance)
+def on_play_button(tree, canvas, controls, player, now_playing_entry, run_time_entry):
+    # Prevent play button if a video is already playing
+    if controls['playing'] and not controls['paused']:
+        messagebox.showinfo("Bilgi", "Zaten bir video oynatılıyor.")
+        return
+
+    # Resume playback if paused
+    if controls['paused']:
+        vsa_window = get_vsa_window()
+        if vsa_window:
+            vsa_window.activate()
+            time.sleep(1)
+            pyautogui.press('enter')
+        # Reload the VSA project if stopped
+        if not controls['playing'] and not controls['paused']:
+            selected_item = tree.selection()
+            if selected_item:
+                vsa_file = tree.item(selected_item[0])['values'][2]
+                open_project(vsa_file)
+
+        vlc_window = get_vlc_window()
+        if vlc_window:
+            vlc_window.activate()
+            time.sleep(1)
+            pyautogui.press('space')
+        player.play()
+        controls['paused'] = False
+        controls['playing'] = True
+        return
+    if controls['playing'] and not controls['paused']:
+        messagebox.showinfo("Bilgi", "Zaten bir video oynatılıyor.")
+        return
+
+        # Resume playback if paused
+        if controls['paused']:
+            vsa_window = get_vsa_window()
+            if vsa_window:
+                vsa_window.activate()
+                time.sleep(1)
+                pyautogui.press('enter')
+            vlc_window = get_vlc_window()
+            if vlc_window:
+                vlc_window.activate()
+                time.sleep(1)
+                pyautogui.press('space')
+            player.play()
+            controls['paused'] = False
+            return
+
+    controls['playing'] = True
+    # cycle_projects_and_videos fonksiyonunu ayrı bir iş parçacığında çalıştır
+    play_thread = threading.Thread(target=cycle_projects_and_videos, args=(tree, canvas, controls, player, now_playing_entry, run_time_entry))
+    play_thread.start()
+
+def on_pause_button(player, controls):
+    # Pause the VSA project and VLC video
+    vsa_window = get_vsa_window()
+    if vsa_window:
+        vsa_window.activate()
+        time.sleep(1)
+        pyautogui.press('space')
+    # Activate VLC window and press space to pause
+    vlc_window = get_vlc_window()
+    if vlc_window:
+        vlc_window.activate()
+        time.sleep(1)
+        pyautogui.press('space')
+    if player.is_playing():
+        player.pause()
+    controls['paused'] = True
+    controls['playing'] = False
+    # Pause the VSA project and VLC video
+    vsa_window = get_vsa_window()
+    if vsa_window:
+        vsa_window.activate()
+        time.sleep(1)
+        pyautogui.press('space')
+    if player.is_playing():
+        player.pause()
+    controls['paused'] = True
+
+def on_stop_button(tree, canvas, controls, player, now_playing_entry, run_time_entry):
+    # Stop the VSA project and VLC video
+    vsa_window = get_vsa_window()
+    if vsa_window:
+        vsa_window.activate()
+        time.sleep(1)
+        pyautogui.press('space')
+    # Reload the VSA project
+    pyautogui.hotkey('ctrl', 'o')
+    time.sleep(1)
+    selected_item = tree.selection()
+    if selected_item:
+        vsa_file = tree.item(selected_item[0])['values'][2]
+        normalized_file_path = os.path.normpath(vsa_file)
+        pyautogui.write(normalized_file_path)
+        pyautogui.press('enter')
+        time.sleep(1)
+        pyautogui.press('enter')
+    vlc_window = get_vlc_window()
+    if vlc_window:
+        vlc_window.activate()
+        time.sleep(1)
+        pyautogui.press('space')
+    if player.is_playing() or controls['paused']:
+        player.stop()
+        controls['playing'] = False
+        controls['paused'] = False
+    now_playing_entry.delete(0, tk.END)
+    run_time_entry.delete(0, tk.END)
+    # Stop the VSA project and VLC video
+    vsa_window = get_vsa_window()
+    if vsa_window:
+        vsa_window.activate()
+        time.sleep(1)
+        pyautogui.press('space')
+    if player.is_playing() or controls['paused']:
+        player.stop()
+        controls['playing'] = False
+        controls['paused'] = False
+    now_playing_entry.delete(0, tk.END)
+    run_time_entry.delete(0, tk.END)
+
+def get_vsa_window():
+    for window in pyautogui.getAllWindows():
+        if window.title.startswith("VSA"):
+            return window
+    return None
+
+def get_vlc_window():
+    for window in pyautogui.getAllWindows():
+        if "VLC" in window.title:
+            return window
+    return None
+    for window in pyautogui.getAllWindows():
+        if window.title.startswith("VSA"):
+            return window
+    return None
 
 def create_gui():
     root = tk.Tk()
@@ -230,6 +376,8 @@ def create_gui():
 
     main_frame = tk.Frame(root)
     main_frame.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
+
+    vlc_instance = vlc.Instance()
 
     create_menu(root, None, {}, None)
 
@@ -276,22 +424,22 @@ def create_gui():
 
     checkboxes = {}
 
+    # Add right-click popup menu for the treeview
+    tree.bind("<Button-3>", lambda event: create_popup_menu(event, tree, checkboxes, table_frame))
+
     button_images = ['add.png', 'play.png', 'pause.png', 'stop.png']
     button_commands = [
         lambda: add_file_to_table(tree, checkboxes, table_frame),
-        lambda: on_play_button(tree, canvas, controls, vlc_instance),
-        lambda: messagebox.showinfo("Pause", "Pause functionality not implemented yet"),
-        lambda: messagebox.showinfo("Stop", "Stop functionality not implemented yet")
+        lambda: on_play_button(tree, canvas, controls, player, now_playing_entry, run_time_entry),
+        lambda: on_pause_button(player, controls),
+        lambda: on_stop_button(tree, canvas, controls, player, now_playing_entry, run_time_entry)
     ]
 
     for img, cmd in zip(button_images, button_commands):
         button = create_image_button(button_frame, os.path.join('photo', img), command=cmd)
         button.pack(side=tk.LEFT, padx=10)
 
-    canvas, video_frame = create_video_area(bottom_frame)
-
-    # VLC instance setup
-    vlc_instance = vlc.Instance()
+    canvas, video_frame, player = create_video_area(bottom_frame, vlc_instance)
 
     # VSA başlatılıyor, proje yüklenecek
     vsa_exe_path = r"C:\Program Files (x86)\Brookshire Software\Visual Show Automation Professional\VSA.exe"
